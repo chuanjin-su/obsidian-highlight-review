@@ -162,8 +162,8 @@ button.har-comment-marker {
   padding: 4px;
 }
 
-.har-selection-toolbar button.har-color-swatch::before,
-.har-color-dot {
+.har-selection-toolbar button.har-color-swatch::before {
+  content: "";
   display: block;
   width: 12px;
   height: 12px;
@@ -172,37 +172,9 @@ button.har-comment-marker {
   border: 1px solid var(--background-modifier-border-hover);
 }
 
-.har-selection-toolbar button.har-color-swatch::before {
-  content: "";
-}
-
 .har-selection-toolbar button.har-color-swatch[aria-pressed="true"]::before {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
-}
-
-.har-color-settings {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
-  gap: 6px;
-}
-
-.har-color-choice {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-s);
-  cursor: pointer;
-}
-
-.har-color-choice:hover {
-  background-color: var(--background-modifier-hover);
-}
-
-.har-color-choice input[type="checkbox"] {
-  margin: 0;
 }
 
 .har-comment-popover [hidden],

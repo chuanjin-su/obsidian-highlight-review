@@ -31,8 +31,8 @@ var import_obsidian5 = require("obsidian");
 var import_obsidian = require("obsidian");
 
 // src/dom.js
-function commentMarker(document) {
-  const button = document.createElement("button");
+function commentMarker(document2) {
+  const button = document2.createElement("button");
   button.type = "button";
   button.className = "har-comment-marker har-annotation";
   button.setAttribute("aria-label", "Show comment");
@@ -121,8 +121,12 @@ var endSafe = (value) => {
   return !tail || tail[0].length % 2 === 0;
 };
 var canWrap = (value) => !/[\r\n]/.test(value) && !containsMarkup(value) && endSafe(value);
+var paletteProperty = (name) => "--har-palette-" + name;
+function defaultPaletteColor(name) {
+  return name === "black" || name === "magenta" ? name : `var(--color-${name}, ${name})`;
+}
 function colorValue(name) {
-  if (colors.includes(name) && name !== "black" && name !== "magenta") return "var(--color-" + name + ", " + name + ")";
+  if (colors.includes(name)) return `var(${paletteProperty(name)}, ${defaultPaletteColor(name)})`;
   return /^(?:[a-z]{1,30}|#[\da-f]{3,8})$/i.test(name) ? name : null;
 }
 function trackMarkup(before, after) {
@@ -169,10 +173,10 @@ function anchoredComments(tokens) {
 
 // src/comments/popover.js
 var CommentPopover = class {
-  constructor(document) {
-    this.document = document;
-    this.window = document.defaultView;
-    this.panel = document.createElement("div");
+  constructor(document2) {
+    this.document = document2;
+    this.window = document2.defaultView;
+    this.panel = document2.createElement("div");
     this.panel.className = "har-comment-popover";
     this.panel.setAttribute("role", "dialog");
     this.heading = this.panel.createDiv({ cls: "har-popover-heading" });
@@ -821,14 +825,14 @@ function collectRuns(root) {
   flush();
   return runs;
 }
-function spanFor(document, role, color) {
+function spanFor(document2, role, color) {
   const tag = { addition: "ins", deletion: "del", anchor: "mark" }[role] || "span";
-  const span = document.createElement(tag);
+  const span = document2.createElement(tag);
   span.className = `har-annotation har-${role}`;
   if (color) span.style.setProperty("--har-color", color);
   return span;
 }
-function applyRun(document, { nodes, excluded, text }, renderColors, bindComment) {
+function applyRun(document2, { nodes, excluded, text }, renderColors, bindComment) {
   const tokens = scan(text, excluded);
   const comments = anchoredComments(tokens);
   const markers = /* @__PURE__ */ new Map();
@@ -843,7 +847,7 @@ function applyRun(document, { nodes, excluded, text }, renderColors, bindComment
     return [nodes[low].node, pos - nodes[low].from];
   }
   function rangeFor(from, to) {
-    const range = document.createRange();
+    const range = document2.createRange();
     range.setStart(...boundary(from, false));
     range.setEnd(...boundary(to, true));
     return range;
@@ -853,7 +857,7 @@ function applyRun(document, { nodes, excluded, text }, renderColors, bindComment
   }
   function wrap(from, to, role, color) {
     const range = rangeFor(from, to);
-    const span = spanFor(document, role, color);
+    const span = spanFor(document2, role, color);
     span.append(range.extractContents());
     range.insertNode(span);
     return span;
@@ -863,7 +867,7 @@ function applyRun(document, { nodes, excluded, text }, renderColors, bindComment
     const color = kind === "color" ? colorValue(token.color) : null;
     if (kind === "color" && (!renderColors || !color)) continue;
     if (kind === "comment") {
-      const marker = commentMarker(document);
+      const marker = commentMarker(document2);
       const range = rangeFor(from, to);
       range.deleteContents();
       range.insertNode(marker);
@@ -908,6 +912,13 @@ var ColorPicker = class extends import_obsidian5.FuzzySuggestModal {
     this.apply(color);
   }
 };
+function pickerColor(sample, context, color) {
+  sample.style.color = defaultPaletteColor(color);
+  context.fillStyle = sample.ownerDocument.defaultView.getComputedStyle(sample).color;
+  context.fillRect(0, 0, 1, 1);
+  const [red, green, blue] = context.getImageData(0, 0, 1, 1).data;
+  return "#" + [red, green, blue].map((channel) => channel.toString(16).padStart(2, "0")).join("");
+}
 var ReviewSettings = class extends import_obsidian5.PluginSettingTab {
   constructor(plugin) {
     super(plugin.app, plugin);
@@ -916,20 +927,55 @@ var ReviewSettings = class extends import_obsidian5.PluginSettingTab {
   display() {
     this.containerEl.empty();
     new import_obsidian5.Setting(this.containerEl).setName("Floating selection toolbar").setDesc("Show highlight colors and comment actions beside selected text in Editing view.").addToggle((toggle) => toggle.setValue(this.plugin.settings.selectionToolbar).onChange((selectionToolbar2) => this.plugin.updateSettings({ selectionToolbar: selectionToolbar2 })));
-    new import_obsidian5.Setting(this.containerEl).setName("Toolbar colors").setDesc("Choose which highlight colors appear when you select text.");
-    const palette = this.containerEl.createDiv({ cls: "har-color-settings", attr: { role: "group", "aria-label": "Toolbar colors" } });
-    for (const color of colors) {
-      const choice = palette.createEl("label", { cls: "har-color-choice" });
-      const input = choice.createEl("input", { attr: { type: "checkbox" } });
-      input.checked = this.plugin.settings.toolbarColors.includes(color);
-      const swatch = choice.createSpan({ cls: "har-color-dot", attr: { "aria-hidden": "true" } });
-      swatch.style.setProperty("--har-swatch", colorValue(color));
-      choice.createSpan({ text: color[0].toUpperCase() + color.slice(1) });
-      input.addEventListener("change", () => {
-        const selected = this.plugin.settings.toolbarColors;
-        const toolbarColors = colors.filter((item) => item === color ? input.checked : selected.includes(item));
-        this.plugin.updateSettings({ toolbarColors });
+    const refreshColors = [];
+    let resetPalette;
+    new import_obsidian5.Setting(this.containerEl).setName("Highlight colors").setDesc("Change the color of highlights and their swatches. Use each switch to show that color in the floating selection toolbar.").addButton((button) => {
+      resetPalette = button.setButtonText("Reset palette").onClick(() => {
+        this.plugin.updateSettings({ colorOverrides: {} });
+        for (const refresh of refreshColors) refresh();
+        resetPalette.setDisabled(true);
       });
+    });
+    const hasOverrides = () => Object.keys(this.plugin.settings.colorOverrides).length > 0;
+    resetPalette.setDisabled(!hasOverrides());
+    const sample = this.containerEl.createEl("canvas", { attr: { hidden: "", width: "1", height: "1" } });
+    const context = sample.getContext("2d", { willReadFrequently: true });
+    context.globalCompositeOperation = "copy";
+    for (const color of colors) {
+      const row = new import_obsidian5.Setting(this.containerEl).setName(color[0].toUpperCase() + color.slice(1));
+      const label = `Change ${color} highlight color`;
+      const picker = row.controlEl.createEl("input", { attr: { type: "color", "aria-label": label } });
+      (0, import_obsidian5.setTooltip)(picker, label);
+      let reset;
+      const refresh = () => {
+        const value = this.plugin.settings.colorOverrides[color];
+        picker.value = value ?? pickerColor(sample, context, color);
+        reset.setDisabled(!value);
+      };
+      const setColor = (value) => {
+        const colorOverrides = { ...this.plugin.settings.colorOverrides };
+        if (value) colorOverrides[color] = value;
+        else delete colorOverrides[color];
+        this.plugin.updateSettings({ colorOverrides });
+        refresh();
+        resetPalette.setDisabled(!hasOverrides());
+      };
+      row.addButton((button) => {
+        reset = button.setButtonText("Reset").setTooltip(`Reset ${color} to default`).onClick(() => setColor(null));
+        reset.buttonEl.setAttribute("aria-label", `Reset ${color} to default`);
+      });
+      row.addToggle((toggle) => {
+        const description = `Show ${color} in the floating selection toolbar`;
+        toggle.setTooltip(description).setValue(this.plugin.settings.toolbarColors.includes(color)).onChange((visible) => {
+          const selected = this.plugin.settings.toolbarColors;
+          const toolbarColors = colors.filter((item) => item === color ? visible : selected.includes(item));
+          this.plugin.updateSettings({ toolbarColors });
+        });
+        toggle.toggleEl.setAttribute("aria-label", description);
+      });
+      picker.addEventListener("change", () => setColor(picker.value));
+      refreshColors.push(refresh);
+      refresh();
     }
   }
 };
@@ -962,14 +1008,28 @@ var HighlightsAndReview = class extends import_obsidian5.Plugin {
     __publicField(this, "tracking", /* @__PURE__ */ new Set());
     __publicField(this, "buttons", /* @__PURE__ */ new Map());
     __publicField(this, "popovers", /* @__PURE__ */ new Map());
+    __publicField(this, "paletteDocuments", /* @__PURE__ */ new Set());
   }
   async onload() {
     const saved = await this.loadData();
     const enabled = saved?.toolbarColors;
+    const colorOverrides = {};
+    for (const color of colors) {
+      const value = saved?.colorOverrides?.[color];
+      if (typeof value === "string" && /^#[\da-f]{6}$/i.test(value)) colorOverrides[color] = value.toLowerCase();
+    }
     this.settings = {
       selectionToolbar: saved?.selectionToolbar ?? true,
-      toolbarColors: Array.isArray(enabled) ? colors.filter((color) => enabled.includes(color)) : [...colors]
+      toolbarColors: Array.isArray(enabled) ? colors.filter((color) => enabled.includes(color)) : [...colors],
+      colorOverrides
     };
+    this.paletteDocuments.add(document);
+    this.applyPalette(document);
+    this.registerEvent(this.app.workspace.on("window-open", (_workspaceWindow, win) => {
+      this.paletteDocuments.add(win.document);
+      this.applyPalette(win.document);
+    }));
+    this.registerEvent(this.app.workspace.on("window-close", (_workspaceWindow, win) => this.paletteDocuments.delete(win.document)));
     this.addSettingTab(new ReviewSettings(this));
     this.registerView(commentsViewType, (leaf) => new CommentsView(leaf, this));
     this.addRibbonIcon("message-square", "Show comments", () => this.openComments());
@@ -990,7 +1050,14 @@ var HighlightsAndReview = class extends import_obsidian5.Plugin {
       this.refreshButtons();
       this.refreshCommentsView();
     };
-    this.app.workspace.onLayoutReady(refreshViews);
+    this.app.workspace.onLayoutReady(() => {
+      this.app.workspace.iterateAllLeaves((leaf) => {
+        const doc = leaf.view.containerEl.ownerDocument;
+        this.paletteDocuments.add(doc);
+        this.applyPalette(doc);
+      });
+      refreshViews();
+    });
     for (const event of ["layout-change", "active-leaf-change", "file-open"]) {
       this.registerEvent(this.app.workspace.on(event, refreshViews));
     }
@@ -1057,10 +1124,18 @@ var HighlightsAndReview = class extends import_obsidian5.Plugin {
   }
   updateSettings(patch) {
     const settings = this.settings = { ...this.settings, ...patch };
+    if (patch.colorOverrides) {
+      for (const doc of this.paletteDocuments) this.applyPalette(doc);
+    }
     this.settingsWrite = (this.settingsWrite ?? Promise.resolve()).then(() => this.saveData(settings)).catch(() => {
       new import_obsidian5.Notice("Highlights & Review preferences could not be saved.");
     });
     return this.settingsWrite;
+  }
+  applyPalette(doc, overrides = this.settings.colorOverrides) {
+    for (const color of colors) {
+      doc.documentElement.style.setProperty(paletteProperty(color), overrides[color] ?? "");
+    }
   }
   selectedChanges(editor) {
     if (!editor.somethingSelected()) {
@@ -1229,9 +1304,9 @@ var HighlightsAndReview = class extends import_obsidian5.Plugin {
   removeComment(editor, line, { token, anchor }) {
     replaceToken(editor, line, token, anchor ? line.text.slice(anchor.bodyFrom, anchor.bodyTo) : "", anchor?.from ?? token.from);
   }
-  popover(document) {
-    if (!this.popovers.has(document)) this.popovers.set(document, new CommentPopover(document));
-    return this.popovers.get(document);
+  popover(document2) {
+    if (!this.popovers.has(document2)) this.popovers.set(document2, new CommentPopover(document2));
+    return this.popovers.get(document2);
   }
   showEditorComment(view, trigger, pin = false) {
     const info = view.state.field(import_obsidian5.editorInfoField, false);
@@ -1369,6 +1444,7 @@ var HighlightsAndReview = class extends import_obsidian5.Plugin {
   }
   onunload() {
     this.unloaded = true;
+    for (const doc of this.paletteDocuments) this.applyPalette(doc, {});
     clearTimeout(this.refreshTimer);
     for (const popover of this.popovers.values()) popover.destroy();
     this.popovers.clear();

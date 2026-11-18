@@ -1,4 +1,4 @@
-name: Publish 1.0.0 beta
+name: Publish 0.2.0 beta
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  RELEASE_TAG: "1.0.0"
+  RELEASE_TAG: "0.2.0"
 
 permissions:
   contents: write
@@ -16,7 +16,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    concurrency: publish-1.0.0-beta
+    concurrency: publish-0.2.0-beta
     steps:
       - uses: actions/checkout@v7
         with:

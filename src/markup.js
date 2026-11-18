@@ -63,8 +63,14 @@ const endSafe = value => {
 };
 export const canWrap = value => !/[\r\n]/.test(value) && !containsMarkup(value) && endSafe(value);
 
+export const paletteProperty = name => "--har-palette-" + name;
+
+export function defaultPaletteColor(name) {
+  return name === "black" || name === "magenta" ? name : `var(--color-${name}, ${name})`;
+}
+
 export function colorValue(name) {
-  if (colors.includes(name) && name !== "black" && name !== "magenta") return "var(--color-" + name + ", " + name + ")";
+  if (colors.includes(name)) return `var(${paletteProperty(name)}, ${defaultPaletteColor(name)})`;
   return /^(?:[a-z]{1,30}|#[\da-f]{3,8})$/i.test(name) ? name : null;
 }
 

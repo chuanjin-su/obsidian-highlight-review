@@ -146,6 +146,16 @@ test("Reading view keeps standalone and neighboring comment markers distinct", (
   ]);
 });
 
+test("Reading view uses palette overrides only for the named palette colors", () => {
+  const root = render("<p>~={red}themed=~ ~={magenta}literal default=~ ~={#123456}explicit=~</p>");
+  const colors = [...root.querySelectorAll(".har-color")].map(span => span.style.getPropertyValue("--har-color"));
+  assert.deepEqual(colors, [
+    "var(--har-palette-red, var(--color-red, red))",
+    "var(--har-palette-magenta, magenta)",
+    "#123456"
+  ]);
+});
+
 test("review ranges include partial changes across lines and skip code and adjacent changes", () => {
   const {doc} = EditorState.create({doc: [
     "{++before++}{--one--} {>>leave me<<}",

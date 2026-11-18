@@ -5,7 +5,7 @@ import { CommentsView, commentsViewType } from "./comments/sidebar.js";
 import { editorLine, editorRect, lineContext, previewExtension } from "./editor/preview.js";
 import { selectionToolbar } from "./editor/selection-toolbar.js";
 import { trackTransaction } from "./editor/tracking.js";
-import { anchoredComments, canWrap, colors, colorValue, isChange, overlaps, reviewText, trackedInRange } from "./markup.js";
+import { anchoredComments, canWrap, colors, defaultPaletteColor, isChange, overlaps, paletteProperty, reviewText, trackedInRange } from "./markup.js";
 import { renderReading } from "./reading.js";
 
 class ColorPicker extends FuzzySuggestModal {
@@ -17,6 +17,14 @@ class ColorPicker extends FuzzySuggestModal {
   getItems() { return colors; }
   getItemText(color) { return color; }
   onChooseItem(color) { this.apply(color); }
+}
+
+function pickerColor(sample, context, color) {
+  sample.style.color = defaultPaletteColor(color);
+  context.fillStyle = sample.ownerDocument.defaultView.getComputedStyle(sample).color;
+  context.fillRect(0, 0, 1, 1);
+  const [red, green, blue] = context.getImageData(0, 0, 1, 1).data;
+  return "#" + [red, green, blue].map(channel => channel.toString(16).padStart(2, "0")).join("");
 }
 
 class ReviewSettings extends PluginSettingTab {
@@ -32,22 +40,60 @@ class ReviewSettings extends PluginSettingTab {
       .addToggle(toggle => toggle.setValue(this.plugin.settings.selectionToolbar)
         .onChange(selectionToolbar => this.plugin.updateSettings({selectionToolbar})));
 
+    const refreshColors = [];
+    let resetPalette;
     new Setting(this.containerEl)
-      .setName("Toolbar colors")
-      .setDesc("Choose which highlight colors appear when you select text.");
-    const palette = this.containerEl.createDiv({cls: "har-color-settings", attr: {role: "group", "aria-label": "Toolbar colors"}});
-    for (const color of colors) {
-      const choice = palette.createEl("label", {cls: "har-color-choice"});
-      const input = choice.createEl("input", {attr: {type: "checkbox"}});
-      input.checked = this.plugin.settings.toolbarColors.includes(color);
-      const swatch = choice.createSpan({cls: "har-color-dot", attr: {"aria-hidden": "true"}});
-      swatch.style.setProperty("--har-swatch", colorValue(color));
-      choice.createSpan({text: color[0].toUpperCase() + color.slice(1)});
-      input.addEventListener("change", () => {
-        const selected = this.plugin.settings.toolbarColors;
-        const toolbarColors = colors.filter(item => item === color ? input.checked : selected.includes(item));
-        this.plugin.updateSettings({toolbarColors});
+      .setName("Highlight colors")
+      .setDesc("Change the color of highlights and their swatches. Use each switch to show that color in the floating selection toolbar.")
+      .addButton(button => {
+        resetPalette = button.setButtonText("Reset palette").onClick(() => {
+          this.plugin.updateSettings({colorOverrides: {}});
+          for (const refresh of refreshColors) refresh();
+          resetPalette.setDisabled(true);
+        });
       });
+    const hasOverrides = () => Object.keys(this.plugin.settings.colorOverrides).length > 0;
+    resetPalette.setDisabled(!hasOverrides());
+
+    const sample = this.containerEl.createEl("canvas", {attr: {hidden: "", width: "1", height: "1"}});
+    const context = sample.getContext("2d", {willReadFrequently: true});
+    context.globalCompositeOperation = "copy";
+    for (const color of colors) {
+      const row = new Setting(this.containerEl).setName(color[0].toUpperCase() + color.slice(1));
+      const label = `Change ${color} highlight color`;
+      const picker = row.controlEl.createEl("input", {attr: {type: "color", "aria-label": label}});
+      setTooltip(picker, label);
+      let reset;
+      const refresh = () => {
+        const value = this.plugin.settings.colorOverrides[color];
+        picker.value = value ?? pickerColor(sample, context, color);
+        reset.setDisabled(!value);
+      };
+      const setColor = value => {
+        const colorOverrides = {...this.plugin.settings.colorOverrides};
+        if (value) colorOverrides[color] = value;
+        else delete colorOverrides[color];
+        this.plugin.updateSettings({colorOverrides});
+        refresh();
+        resetPalette.setDisabled(!hasOverrides());
+      };
+      row.addButton(button => {
+        reset = button.setButtonText("Reset").setTooltip(`Reset ${color} to default`).onClick(() => setColor(null));
+        reset.buttonEl.setAttribute("aria-label", `Reset ${color} to default`);
+      });
+      row.addToggle(toggle => {
+        const description = `Show ${color} in the floating selection toolbar`;
+        toggle.setTooltip(description).setValue(this.plugin.settings.toolbarColors.includes(color))
+          .onChange(visible => {
+            const selected = this.plugin.settings.toolbarColors;
+            const toolbarColors = colors.filter(item => item === color ? visible : selected.includes(item));
+            this.plugin.updateSettings({toolbarColors});
+          });
+        toggle.toggleEl.setAttribute("aria-label", description);
+      });
+      picker.addEventListener("change", () => setColor(picker.value));
+      refreshColors.push(refresh);
+      refresh();
     }
   }
 }
@@ -84,14 +130,28 @@ export default class HighlightsAndReview extends Plugin {
   tracking = new Set();
   buttons = new Map();
   popovers = new Map();
+  paletteDocuments = new Set();
 
   async onload() {
     const saved = await this.loadData();
     const enabled = saved?.toolbarColors;
+    const colorOverrides = {};
+    for (const color of colors) {
+      const value = saved?.colorOverrides?.[color];
+      if (typeof value === "string" && /^#[\da-f]{6}$/i.test(value)) colorOverrides[color] = value.toLowerCase();
+    }
     this.settings = {
       selectionToolbar: saved?.selectionToolbar ?? true,
-      toolbarColors: Array.isArray(enabled) ? colors.filter(color => enabled.includes(color)) : [...colors]
+      toolbarColors: Array.isArray(enabled) ? colors.filter(color => enabled.includes(color)) : [...colors],
+      colorOverrides
     };
+    this.paletteDocuments.add(document);
+    this.applyPalette(document);
+    this.registerEvent(this.app.workspace.on("window-open", (_workspaceWindow, win) => {
+      this.paletteDocuments.add(win.document);
+      this.applyPalette(win.document);
+    }));
+    this.registerEvent(this.app.workspace.on("window-close", (_workspaceWindow, win) => this.paletteDocuments.delete(win.document)));
     this.addSettingTab(new ReviewSettings(this));
     this.registerView(commentsViewType, leaf => new CommentsView(leaf, this));
     this.addRibbonIcon("message-square", "Show comments", () => this.openComments());
@@ -109,7 +169,14 @@ export default class HighlightsAndReview extends Plugin {
       this.refreshButtons();
       this.refreshCommentsView();
     };
-    this.app.workspace.onLayoutReady(refreshViews);
+    this.app.workspace.onLayoutReady(() => {
+      this.app.workspace.iterateAllLeaves(leaf => {
+        const doc = leaf.view.containerEl.ownerDocument;
+        this.paletteDocuments.add(doc);
+        this.applyPalette(doc);
+      });
+      refreshViews();
+    });
     for (const event of ["layout-change", "active-leaf-change", "file-open"]) {
       this.registerEvent(this.app.workspace.on(event, refreshViews));
     }
@@ -167,10 +234,19 @@ export default class HighlightsAndReview extends Plugin {
 
   updateSettings(patch) {
     const settings = this.settings = {...this.settings, ...patch};
+    if (patch.colorOverrides) {
+      for (const doc of this.paletteDocuments) this.applyPalette(doc);
+    }
     this.settingsWrite = (this.settingsWrite ?? Promise.resolve()).then(() => this.saveData(settings)).catch(() => {
       new Notice("Highlights & Review preferences could not be saved.");
     });
     return this.settingsWrite;
+  }
+
+  applyPalette(doc, overrides = this.settings.colorOverrides) {
+    for (const color of colors) {
+      doc.documentElement.style.setProperty(paletteProperty(color), overrides[color] ?? "");
+    }
   }
 
   selectedChanges(editor) {
@@ -503,6 +579,7 @@ export default class HighlightsAndReview extends Plugin {
 
   onunload() {
     this.unloaded = true;
+    for (const doc of this.paletteDocuments) this.applyPalette(doc, {});
     clearTimeout(this.refreshTimer);
     for (const popover of this.popovers.values()) popover.destroy();
     this.popovers.clear();
