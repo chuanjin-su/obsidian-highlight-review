@@ -1,0 +1,9 @@
+{
+  "id": "highlights-and-review",
+  "name": "Highlights & Review",
+  "version": "1.0.0",
+  "minAppVersion": "1.7.2",
+  "description": "Fast Text Color syntax, inline CriticMarkup comments, and tracked prose edits.",
+  "author": "Local",
+  "isDesktopOnly": false
+}
