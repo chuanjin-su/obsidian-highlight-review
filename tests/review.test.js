@@ -5,6 +5,7 @@ import { history, redo, undo } from "@codemirror/commands";
 import { JSDOM } from "jsdom";
 import { reviewText, scan, trackedInRange } from "../src/markup.js";
 import { renderReading } from "../src/reading.js";
+import { highlightCellParts, highlightParts, highlightTransaction } from "../src/editor/highlights.js";
 import { trackTransaction } from "../src/editor/tracking.js";
 
 const noContext = () => ({block: false, excluded: []});
@@ -188,4 +189,78 @@ test("Reading view handles adjacent edits and excludes code, while delegating co
   assert.deepEqual([...root.querySelectorAll("ins, del")].map(n => n.textContent), ["add", "delete", "old", "new"]);
   assert.equal(root.querySelector("p").textContent, "adddeleteoldnew ~={red}a=~ {++literal++}");
   assert.equal(root.querySelector("pre").textContent, "{--literal--}");
+});
+
+function applyHighlight(target, parts, color) {
+  const {state} = target;
+  const {changes, selection} = highlightTransaction(parts, color, true);
+  const offset = (doc, {line, ch}) => doc.line(line + 1).from + ch;
+  const patch = state.changes(changes.map(({from, to, text}) => ({
+    from: offset(state.doc, from), to: offset(state.doc, to), insert: text
+  })));
+  const doc = patch.apply(state.doc);
+  target.dispatch(state.update({changes: patch, selection: {
+    anchor: offset(doc, selection.from), head: offset(doc, selection.to)
+  }}));
+}
+
+test("multiline highlighting preserves Markdown line structure and can be undone together", () => {
+  const text = "Unselected first  \n\n- second line\n- last outside";
+  const {target} = editor(text);
+  const parts = highlightParts(target.state.doc, 11, text.indexOf(" outside"), line => ({
+    ...noContext(), contentFrom: line.text.startsWith("- ") ? 2 : 0
+  }));
+  applyHighlight(target, parts, "red");
+  assert.equal(target.state.doc.toString(), "Unselected ~={red}first=~  \n\n- ~={red}second line=~\n- ~={red}last=~ outside");
+  const {doc, selection} = target.state;
+  assert.equal(doc.sliceString(selection.main.from, selection.main.to), "first=~  \n\n- ~={red}second line=~\n- ~={red}last");
+  assert.equal(undo(target), true);
+  assert.equal(target.state.doc.toString(), text);
+});
+
+test("table highlights preserve cell separators, alignment rows, escaped pipes, and cell breaks", () => {
+  const text = "Before\n\n| One | Two |\n| --- | :---: |\n| a\\|b<br>second | last |\n\nAfter";
+  const {target} = editor(text);
+  const context = line => ({
+    ...noContext(), table: line.text.startsWith("|"), structural: line.number === 4
+  });
+  assert.equal(highlightParts(target.state.doc, 2, text.indexOf("second"), context), null);
+  assert.equal(highlightParts(target.state.doc, text.indexOf("second"), text.length, context), null);
+  const parts = highlightParts(target.state.doc, text.indexOf("One"), text.indexOf("last") + 4, context);
+  assert.deepEqual(parts.map(part => part.value), ["One", "Two", "a\\|b", "second", "last"]);
+  applyHighlight(target, parts, "blue");
+  assert.equal(target.state.doc.toString(),
+    "Before\n\n| ~={blue}One=~ | ~={blue}Two=~ |\n| --- | :---: |\n| ~={blue}a\\|b=~<br>~={blue}second=~ | ~={blue}last=~ |\n\nAfter");
+  const root = render("<table><tr><td>~={blue}a|b=~<br>~={blue}second=~</td><td>~={blue}last=~</td></tr></table>");
+  assert.deepEqual([...root.querySelectorAll(".har-color")].map(span => span.textContent), ["a|b", "second", "last"]);
+});
+
+test("multiline highlights can be recolored or removed without nesting markers", () => {
+  const {target} = editor("~={red}first=~\n~={green}second=~");
+  const parts = highlightParts(target.state.doc, 9, target.state.doc.length - 3, noContext);
+  applyHighlight(target, parts, "red");
+  assert.equal(target.state.doc.toString(), "~={red}first=~\n~={red}second=~");
+  const {doc, selection} = target.state;
+  const selected = highlightParts(doc, selection.main.from, selection.main.to, noContext);
+  applyHighlight(target, selected, null);
+  assert.equal(target.state.doc.toString(), "first\nsecond");
+  assert.deepEqual([target.state.selection.main.from, target.state.selection.main.to], [0, 12]);
+});
+
+test("a rectangular selection highlights only the chosen cells in a single transaction", () => {
+  const text = "| A | B | C |\n| --- | --- | --- |\n| 1 | first<br>second | 3 |\n| 4 | | 6 |";
+  const {target} = editor(text);
+  const cellAt = (value, textStart) => ({
+    text: value, getAbsoluteOffsets: () => ({textStart, textEnd: textStart + value.length})
+  });
+  const cells = [cellAt("B", text.indexOf("B")), cellAt("first<br>second", text.indexOf("first")), cellAt("", -1)];
+  const context = () => ({...noContext(), table: true});
+  const parts = highlightCellParts(target.state.doc, cells, context);
+  assert.deepEqual(parts.map(part => part.value), ["B", "first", "second"]);
+  applyHighlight(target, parts, "green");
+  assert.equal(target.state.doc.toString(),
+    "| A | ~={green}B=~ | C |\n| --- | --- | --- |\n| 1 | ~={green}first=~<br>~={green}second=~ | 3 |\n| 4 | | 6 |");
+  assert.deepEqual(highlightCellParts(target.state.doc, cells, context), []);
+  assert.equal(undo(target), true);
+  assert.equal(target.state.doc.toString(), text);
 });

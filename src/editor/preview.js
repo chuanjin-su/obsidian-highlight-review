@@ -4,26 +4,37 @@ import { editorLivePreviewField } from "obsidian";
 import { commentMarker } from "../dom.js";
 import { anchoredComments, colorValue, scan } from "../markup.js";
 
-export function lineContext(state, line) {
+export function lineContext(state, line, tree) {
   if (!state?.doc || state.doc.line(line.number).text !== line.text) return {block: false, excluded: []};
-  let block = false;
+  let block = false, table = false, structural = false;
+  let contentFrom = 0, contentTo = line.length;
   const excluded = [];
   const add = (from, to) => {
     from = Math.max(0, from - line.from);
     to = Math.min(line.length, to - line.from);
     if (from < to) excluded.push({from, to});
   };
-  syntaxTree(state).iterate({
+  (tree ?? syntaxTree(state)).iterate({
     from: line.from, to: line.to,
     enter({name, from, to}) {
+      if (to <= line.from || from >= line.to) return;
       if (/hmd[-_]?(?:codeblock|frontmatter|indented-code)|hypermd[-_]?(?:codeblock|math)|^(?:FencedCode|CodeBlock|Frontmatter)$/i.test(name)) {
         block = true;
         return false;
       }
       if (/inline-code|math-inline|^InlineCode$/i.test(name)) add(from, to);
+      if (/HyperMD-table-row|^(?:Table|TableHeader|TableRow|TableDelimiter)$/i.test(name)) table = true;
+      if (/HyperMD-(?:table-row-1|header-line)(?:_|$)|(?:^|_)hr(?:_|$)|^(?:TableDelimiter|HorizontalRule)$/i.test(name)) structural = true;
+      if (/hmd-(?:list-indent|callout)|formatting-(?:quote|list|task|header)/.test(name)) {
+        const start = Math.max(0, from - line.from);
+        const end = Math.min(line.length, to - line.from);
+        if (/formatting-header/.test(name) && line.text.slice(contentFrom, start).trim()) contentTo = start;
+        else contentFrom = end;
+      }
+      if (/(?:^|_)blockid(?:_|$)/.test(name)) contentTo = Math.min(contentTo, from - line.from);
     }
   });
-  return {block, excluded};
+  return {block, excluded, table, structural, contentFrom, contentTo};
 }
 
 export function editorLine(editor, number) {
@@ -36,11 +47,11 @@ export function editorLine(editor, number) {
 export function editorRect(view, from, to = from) {
   if (to > view.state.doc.length) return null;
   const start = view.coordsAtPos(from, 1);
-  if (!start) return null;
   const bounds = view.scrollDOM.getBoundingClientRect();
-  if (start.bottom <= bounds.top || start.top >= bounds.bottom) return null;
   const end = view.coordsAtPos(to, -1);
-  if (!end || Math.abs(start.top - end.top) > 2) return start;
+  const visible = rect => rect && rect.bottom > bounds.top && rect.top < bounds.bottom;
+  if (!visible(start)) return visible(end) ? end : null;
+  if (!visible(end) || Math.abs(start.top - end.top) > 2) return start;
   return {top: start.top, bottom: start.bottom, left: Math.min(start.left, end.left), right: Math.max(start.right, end.right)};
 }
 

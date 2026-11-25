@@ -48,24 +48,43 @@ export function selectionToolbar(plugin) {
         if (event.button !== 0) return;
         this.dragging = true;
         this.dismissed = false;
+        this.options = null;
         this.panel.remove();
         this.document.addEventListener("pointerup", this.stopDrag, true);
         this.document.addEventListener("pointercancel", this.stopDrag, true);
       };
-      this.dismiss = () => {
+      this.dismiss = event => {
+        if (event?.type === "contextmenu") plugin.tableHighlightMenu(view, event);
         this.dismissed = true;
+        this.options = null;
         this.panel.remove();
       };
       this.key = event => { if (event.key === "Escape" && this.panel.isConnected) this.dismiss(); };
-      view.dom.addEventListener("pointerdown", this.startDrag);
+      view.dom.addEventListener("pointerdown", this.startDrag, true);
       view.dom.addEventListener("contextmenu", this.dismiss);
       view.dom.addEventListener("keydown", this.key);
-      view.scrollDOM.addEventListener("scroll", this.schedule);
+      view.dom.addEventListener("scroll", this.schedule, true);
       this.window.addEventListener("resize", this.schedule);
+      this.resizeObserver = new this.window.ResizeObserver(this.schedule);
+      this.resizeObserver.observe(view.dom);
+      this.tableObserver = new this.window.MutationObserver(records => {
+        if (records.some(({target, oldValue}) => target.classList.contains("cm-table-widget") &&
+            target.classList.contains("has-selection") !== (oldValue ?? "").split(/\s+/).includes("has-selection"))) {
+          this.dismissed = false;
+          this.options = null;
+          this.schedule();
+        }
+      });
+      this.tableObserver.observe(view.contentDOM, {
+        subtree: true, attributes: true, attributeOldValue: true, attributeFilter: ["class"]
+      });
     }
 
     update(update) {
-      if (update.selectionSet || update.docChanged) this.dismissed = false;
+      if (update.selectionSet || update.docChanged) {
+        this.dismissed = false;
+        this.options = null;
+      }
       if (update.selectionSet || update.docChanged || update.geometryChanged || update.viewportChanged || update.focusChanged) this.schedule();
     }
 
@@ -73,11 +92,12 @@ export function selectionToolbar(plugin) {
       const {view, panel} = this;
       const range = view.state.selection.main;
       const {selectionToolbar, toolbarColors} = plugin.settings;
-      const options = !this.dragging && !this.dismissed && selectionToolbar &&
-        view.hasFocus && !range.empty && plugin.toolbarOptions(view);
+      const options = !this.dragging && !this.dismissed && selectionToolbar && plugin.toolbarOptions(view);
       const showPalette = options?.applyColor && toolbarColors.length > 0;
-      const rect = (showPalette || options?.removeColor || options?.comment) && editorRect(view, range.from, range.to);
+      const rect = (showPalette || options?.removeColor || options?.comment) &&
+        (options.rect ? options.rect() : editorRect(view, range.from, range.to));
       if (!rect) {
+        this.options = null;
         panel.remove();
         return;
       }
@@ -98,11 +118,13 @@ export function selectionToolbar(plugin) {
       const {view} = this;
       this.stopDrag();
       this.window.cancelAnimationFrame(this.frame);
+      this.resizeObserver.disconnect();
+      this.tableObserver.disconnect();
       this.window.removeEventListener("resize", this.schedule);
-      view.dom.removeEventListener("pointerdown", this.startDrag);
+      view.dom.removeEventListener("pointerdown", this.startDrag, true);
       view.dom.removeEventListener("contextmenu", this.dismiss);
       view.dom.removeEventListener("keydown", this.key);
-      view.scrollDOM.removeEventListener("scroll", this.schedule);
+      view.dom.removeEventListener("scroll", this.schedule, true);
       this.panel.remove();
     }
   });

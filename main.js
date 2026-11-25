@@ -24,6 +24,7 @@ __export(main_exports, {
   default: () => HighlightsAndReview
 });
 module.exports = __toCommonJS(main_exports);
+var import_language2 = require("@codemirror/language");
 var import_state2 = require("@codemirror/state");
 var import_obsidian5 = require("obsidian");
 
@@ -344,27 +345,38 @@ var import_obsidian3 = require("obsidian");
 var import_language = require("@codemirror/language");
 var import_view = require("@codemirror/view");
 var import_obsidian2 = require("obsidian");
-function lineContext(state, line) {
+function lineContext(state, line, tree) {
   if (!state?.doc || state.doc.line(line.number).text !== line.text) return { block: false, excluded: [] };
-  let block = false;
+  let block = false, table = false, structural = false;
+  let contentFrom = 0, contentTo = line.length;
   const excluded = [];
   const add = (from, to) => {
     from = Math.max(0, from - line.from);
     to = Math.min(line.length, to - line.from);
     if (from < to) excluded.push({ from, to });
   };
-  (0, import_language.syntaxTree)(state).iterate({
+  (tree ?? (0, import_language.syntaxTree)(state)).iterate({
     from: line.from,
     to: line.to,
     enter({ name, from, to }) {
+      if (to <= line.from || from >= line.to) return;
       if (/hmd[-_]?(?:codeblock|frontmatter|indented-code)|hypermd[-_]?(?:codeblock|math)|^(?:FencedCode|CodeBlock|Frontmatter)$/i.test(name)) {
         block = true;
         return false;
       }
       if (/inline-code|math-inline|^InlineCode$/i.test(name)) add(from, to);
+      if (/HyperMD-table-row|^(?:Table|TableHeader|TableRow|TableDelimiter)$/i.test(name)) table = true;
+      if (/HyperMD-(?:table-row-1|header-line)(?:_|$)|(?:^|_)hr(?:_|$)|^(?:TableDelimiter|HorizontalRule)$/i.test(name)) structural = true;
+      if (/hmd-(?:list-indent|callout)|formatting-(?:quote|list|task|header)/.test(name)) {
+        const start = Math.max(0, from - line.from);
+        const end = Math.min(line.length, to - line.from);
+        if (/formatting-header/.test(name) && line.text.slice(contentFrom, start).trim()) contentTo = start;
+        else contentFrom = end;
+      }
+      if (/(?:^|_)blockid(?:_|$)/.test(name)) contentTo = Math.min(contentTo, from - line.from);
     }
   });
-  return { block, excluded };
+  return { block, excluded, table, structural, contentFrom, contentTo };
 }
 function editorLine(editor, number) {
   const text = editor.getLine(number);
@@ -375,11 +387,11 @@ function editorLine(editor, number) {
 function editorRect(view, from, to = from) {
   if (to > view.state.doc.length) return null;
   const start = view.coordsAtPos(from, 1);
-  if (!start) return null;
   const bounds = view.scrollDOM.getBoundingClientRect();
-  if (start.bottom <= bounds.top || start.top >= bounds.bottom) return null;
   const end = view.coordsAtPos(to, -1);
-  if (!end || Math.abs(start.top - end.top) > 2) return start;
+  const visible = (rect) => rect && rect.bottom > bounds.top && rect.top < bounds.bottom;
+  if (!visible(start)) return visible(end) ? end : null;
+  if (!visible(end) || Math.abs(start.top - end.top) > 2) return start;
   return { top: start.top, bottom: start.bottom, left: Math.min(start.left, end.left), right: Math.max(start.right, end.right) };
 }
 var CommentWidget = class extends import_view.WidgetType {
@@ -589,6 +601,101 @@ var CommentsView = class extends import_obsidian3.ItemView {
   }
 };
 
+// src/editor/highlights.js
+function splitAt(text, from, to, separators) {
+  const ranges = [];
+  for (const match of text.matchAll(separators)) {
+    const [separator, pipe] = match;
+    const end = match.index + separator.length;
+    const index = pipe ? end - 1 : match.index;
+    if (index >= to) break;
+    if (end <= from) continue;
+    if (from < index) ranges.push({ from, to: index });
+    from = end;
+  }
+  if (from < to) ranges.push({ from, to });
+  return ranges;
+}
+var breaks = /<br\s*\/?>/gi;
+var cellSeparators = /(?<!\\)(?:\\\\)*(\|)|<br\s*\/?>/gi;
+function highlightParts(doc, from, to, context) {
+  if (from >= to) return [];
+  const parts = [];
+  let inTable;
+  const last = doc.lineAt(to).number;
+  for (let number = doc.lineAt(from).number; number <= last; number++) {
+    const line = doc.line(number);
+    const start = Math.max(0, from - line.from);
+    const end = Math.min(line.length, to - line.from);
+    if (!line.text.slice(start, end).trim()) continue;
+    const { block, excluded, table, structural, contentFrom = 0, contentTo = line.length } = context(line);
+    if (block || inTable !== void 0 && inTable !== table) return null;
+    inTable = table;
+    if (structural) continue;
+    const ranges = splitAt(line.text, contentFrom, contentTo, table ? cellSeparators : breaks);
+    const tokens = scan(line.text, excluded);
+    for (const range of ranges) {
+      const from2 = Math.max(start, range.from);
+      const to2 = Math.min(end, range.to);
+      if (from2 >= to2) continue;
+      if (excluded.some((part) => overlaps(part, from2, to2))) return null;
+      let next = from2;
+      const addText = (end2) => {
+        const raw = line.text.slice(next, end2);
+        const value = raw.trim();
+        if (!value) return true;
+        const from3 = next + raw.length - raw.trimStart().length;
+        if (!canWrap(value) || /(?:^|[^\\])(?:\\\\)*\\$/.test(line.text.slice(0, from3))) return false;
+        parts.push({ line: number - 1, from: from3, to: from3 + value.length, value });
+        return true;
+      };
+      for (const token of tokens) {
+        if (!overlaps(token, from2, to2)) continue;
+        if (token.kind !== "color" || token.from < range.from || token.to > range.to || !addText(Math.max(next, token.from))) return null;
+        parts.push(colorPart(number - 1, line.text, token));
+        next = token.to;
+      }
+      if (!addText(Math.max(next, to2))) return null;
+    }
+  }
+  return parts;
+}
+function highlightCellParts(doc, cells, context) {
+  const parts = [];
+  for (const cell of cells) {
+    if (!cell.text.trim()) continue;
+    const { textStart, textEnd } = cell.getAbsoluteOffsets();
+    if (textStart < 0 || textEnd > doc.length || doc.sliceString(textStart, textEnd) !== cell.text) return [];
+    const selected = highlightParts(doc, textStart, textEnd, context);
+    if (!selected) return [];
+    parts.push(...selected);
+  }
+  return parts;
+}
+function colorPart(line, text, token) {
+  return { line, from: token.from, to: token.to, value: text.slice(token.bodyFrom, token.bodyTo), color: token.color };
+}
+function highlightTransaction(parts, color, select) {
+  const prefix = color ? "~={" + color + "}" : "";
+  const suffix = color ? "=~" : "";
+  const changes = [];
+  let from, to, delta = 0;
+  for (const part of parts) {
+    const start = { line: part.line, ch: part.from };
+    const end = { line: part.line, ch: part.to };
+    if (to?.line !== part.line) delta = 0;
+    from ?? (from = { line: part.line, ch: part.from + prefix.length });
+    to = { line: part.line, ch: part.from + delta + prefix.length + part.value.length };
+    if (part.color !== color) {
+      const text = prefix + part.value + suffix;
+      changes.push({ from: start, to: end, text });
+      delta += text.length - (part.to - part.from);
+    }
+  }
+  const selection = select ? { from, to } : color ? void 0 : { from: to };
+  return { changes, selection };
+}
+
 // src/editor/selection-toolbar.js
 var import_view2 = require("@codemirror/view");
 var import_obsidian4 = require("obsidian");
@@ -636,35 +743,57 @@ function selectionToolbar(plugin) {
         if (event.button !== 0) return;
         this.dragging = true;
         this.dismissed = false;
+        this.options = null;
         this.panel.remove();
         this.document.addEventListener("pointerup", this.stopDrag, true);
         this.document.addEventListener("pointercancel", this.stopDrag, true);
       };
-      this.dismiss = () => {
+      this.dismiss = (event) => {
+        if (event?.type === "contextmenu") plugin.tableHighlightMenu(view, event);
         this.dismissed = true;
+        this.options = null;
         this.panel.remove();
       };
       this.key = (event) => {
         if (event.key === "Escape" && this.panel.isConnected) this.dismiss();
       };
-      view.dom.addEventListener("pointerdown", this.startDrag);
+      view.dom.addEventListener("pointerdown", this.startDrag, true);
       view.dom.addEventListener("contextmenu", this.dismiss);
       view.dom.addEventListener("keydown", this.key);
-      view.scrollDOM.addEventListener("scroll", this.schedule);
+      view.dom.addEventListener("scroll", this.schedule, true);
       this.window.addEventListener("resize", this.schedule);
+      this.resizeObserver = new this.window.ResizeObserver(this.schedule);
+      this.resizeObserver.observe(view.dom);
+      this.tableObserver = new this.window.MutationObserver((records) => {
+        if (records.some(({ target, oldValue }) => target.classList.contains("cm-table-widget") && target.classList.contains("has-selection") !== (oldValue ?? "").split(/\s+/).includes("has-selection"))) {
+          this.dismissed = false;
+          this.options = null;
+          this.schedule();
+        }
+      });
+      this.tableObserver.observe(view.contentDOM, {
+        subtree: true,
+        attributes: true,
+        attributeOldValue: true,
+        attributeFilter: ["class"]
+      });
     }
     update(update) {
-      if (update.selectionSet || update.docChanged) this.dismissed = false;
+      if (update.selectionSet || update.docChanged) {
+        this.dismissed = false;
+        this.options = null;
+      }
       if (update.selectionSet || update.docChanged || update.geometryChanged || update.viewportChanged || update.focusChanged) this.schedule();
     }
     refresh() {
       const { view, panel } = this;
       const range = view.state.selection.main;
       const { selectionToolbar: selectionToolbar2, toolbarColors } = plugin.settings;
-      const options = !this.dragging && !this.dismissed && selectionToolbar2 && view.hasFocus && !range.empty && plugin.toolbarOptions(view);
+      const options = !this.dragging && !this.dismissed && selectionToolbar2 && plugin.toolbarOptions(view);
       const showPalette = options?.applyColor && toolbarColors.length > 0;
-      const rect = (showPalette || options?.removeColor || options?.comment) && editorRect(view, range.from, range.to);
+      const rect = (showPalette || options?.removeColor || options?.comment) && (options.rect ? options.rect() : editorRect(view, range.from, range.to));
       if (!rect) {
+        this.options = null;
         panel.remove();
         return;
       }
@@ -684,14 +813,49 @@ function selectionToolbar(plugin) {
       const { view } = this;
       this.stopDrag();
       this.window.cancelAnimationFrame(this.frame);
+      this.resizeObserver.disconnect();
+      this.tableObserver.disconnect();
       this.window.removeEventListener("resize", this.schedule);
-      view.dom.removeEventListener("pointerdown", this.startDrag);
+      view.dom.removeEventListener("pointerdown", this.startDrag, true);
       view.dom.removeEventListener("contextmenu", this.dismiss);
       view.dom.removeEventListener("keydown", this.key);
-      view.scrollDOM.removeEventListener("scroll", this.schedule);
+      view.dom.removeEventListener("scroll", this.schedule, true);
       this.panel.remove();
     }
   });
+}
+
+// src/editor/table-selection.js
+var import_view3 = require("@codemirror/view");
+var selectedTableSelector = ".cm-table-widget.has-selection";
+function selectedTable(view) {
+  const element = view?.contentDOM.querySelector(selectedTableSelector);
+  if (!element) return null;
+  for (const decorations of view.state.facet(import_view3.EditorView.decorations)) {
+    if (typeof decorations === "function") continue;
+    let table;
+    decorations.between(view.viewport.from, view.viewport.to, (_from, _to, decoration) => {
+      const widget = decoration.spec.widget;
+      if (widget?.containerEl === element && widget.selectedCells?.length) {
+        table = widget;
+        return false;
+      }
+    });
+    if (table) return table;
+  }
+  return null;
+}
+function selectedCellsRect(table, view) {
+  const first = table.selectedCells[0]?.el.getBoundingClientRect();
+  const last = table.selectedCells.at(-1)?.el.getBoundingClientRect();
+  if (!first || !last) return null;
+  const viewport = view.scrollDOM.getBoundingClientRect();
+  const widget = table.containerEl.getBoundingClientRect();
+  const left = Math.max(Math.min(first.left, last.left), widget.left, viewport.left);
+  const right = Math.min(Math.max(first.right, last.right), widget.right, viewport.right);
+  const top = Math.max(first.top, viewport.top);
+  const bottom = Math.min(last.bottom, viewport.bottom);
+  return left < right && top < bottom ? { left, right, top, bottom } : null;
 }
 
 // src/editor/tracking.js
@@ -1073,8 +1237,10 @@ var HighlightsAndReview = class extends import_obsidian5.Plugin {
     } });
     this.addCommand({ id: "add-comment", name: "Add CriticMarkup comment", editorCallback: (editor, info) => this.addComment(editor, info) });
     this.addCommand({ id: "highlight", name: "Highlight selection\u2026", editorCheckCallback: (checking, editor, info) => {
-      if (!editor.somethingSelected()) return false;
-      if (!checking) this.highlight(editor, info);
+      const table = selectedTable(editor.cm);
+      const parts = this.highlightSelection(editor, table);
+      if (!parts.length) return false;
+      if (!checking) this.highlight(editor, info, parts, table);
       return true;
     } });
     this.reviewCommand("accept-change", "Accept tracked change", true);
@@ -1089,19 +1255,21 @@ var HighlightsAndReview = class extends import_obsidian5.Plugin {
       "Remove CriticMarkup comment",
       (editor, _info, line, comment) => this.removeComment(editor, line, comment)
     );
-    this.annotationCommand(
-      "remove-highlight",
-      "Remove color highlight",
-      (token) => token.kind === "color",
-      (editor, line, token) => replaceToken(editor, line, token, line.text.slice(token.bodyFrom, token.bodyTo))
-    );
+    this.addCommand({ id: "remove-highlight", name: "Remove color highlight", editorCheckCallback: (checking, editor) => {
+      const table = selectedTable(editor.cm);
+      const parts = this.removableHighlights(editor, this.highlightSelection(editor, table), table);
+      if (!parts.length) return false;
+      if (!checking) this.setHighlight(editor, parts, null, false, table);
+      return true;
+    } });
     this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor, info) => {
       const add = (label, icon, callback) => menu.addItem((item) => item.setTitle(label).setIcon(icon).onClick(callback));
       const line = selectionLine(editor);
       const changes = this.selectedChanges(editor);
       const comment = commentAt(line);
-      const color = annotationAt(line, (token) => token.kind === "color");
       const snapshot = this.snapshot(editor, info);
+      const highlightEditor = info.editor ?? editor;
+      const table = selectedTable(highlightEditor.cm);
       if (changes.length) {
         const label = editor.somethingSelected() ? "tracked changes in selection" : "tracked change";
         add(`Accept ${label}`, "check", () => snapshot(() => this.applyReview(editor, changes, true)));
@@ -1111,15 +1279,10 @@ var HighlightsAndReview = class extends import_obsidian5.Plugin {
         add("Edit CriticMarkup comment", "message-square", () => snapshot(() => this.editComment(editor, info, line.from.line, line.text, comment)));
         add("Remove CriticMarkup comment", "trash-2", () => snapshot(() => this.removeComment(editor, line, comment)));
       }
-      if (color) add("Remove color highlight", "eraser", () => snapshot(() => replaceToken(editor, line, color, line.text.slice(color.bodyFrom, color.bodyTo))));
-      if (line && !changes.length && !comment && !color) {
+      const hasHighlight = this.addHighlightMenuItems(menu, highlightEditor, info, table);
+      if (line && !changes.length && !comment && !hasHighlight) {
         add("Add CriticMarkup comment", "message-square-plus", () => this.addComment(editor, info));
       }
-      if (this.highlightSelection(editor, line)) add(
-        color ? "Change highlight color\u2026" : "Highlight selection\u2026",
-        "highlighter",
-        () => this.highlight(editor, info)
-      );
     }));
   }
   updateSettings(patch) {
@@ -1176,15 +1339,6 @@ var HighlightsAndReview = class extends import_obsidian5.Plugin {
   fastColorsActive() {
     return Boolean(this.app.plugins?.getPlugin?.("fast-text-color"));
   }
-  annotationCommand(id, name, predicate, action) {
-    this.addCommand({ id, name, editorCheckCallback: (checking, editor, info) => {
-      const line = selectionLine(editor);
-      const token = annotationAt(line, predicate);
-      if (!token) return false;
-      if (!checking) action(editor, line, token, info);
-      return true;
-    } });
-  }
   snapshot(editor, info) {
     const file = info.file;
     const read = () => editor.cm?.state.doc ?? editor.getValue();
@@ -1209,53 +1363,78 @@ var HighlightsAndReview = class extends import_obsidian5.Plugin {
     }
     return null;
   }
-  highlightSelection(editor, line = selectionLine(editor)) {
-    if (!line || !editor.somethingSelected() || editor.listSelections().length !== 1) return null;
-    const { from, to, text, tokens } = line;
-    const token = tokens.find((token2) => token2.kind === "color" && token2.from <= from.ch && token2.to >= to.ch);
-    if (token) return {
-      from: { ...from, ch: token.from },
-      to: { ...to, ch: token.to },
-      value: text.slice(token.bodyFrom, token.bodyTo),
-      color: token.color
-    };
-    const selection = this.selectedText(editor, line);
-    return selection?.value.trim() ? selection : null;
-  }
-  highlight(editor, info) {
-    const selection = this.highlightSelection(editor);
-    if (!selection) {
-      new import_obsidian5.Notice("Select single-line prose or an existing color highlight.");
-      return;
+  highlightSelection(editor, table) {
+    const state = editor.cm?.state;
+    if (!state || state.readOnly) return [];
+    if (table) {
+      const tree2 = (0, import_language2.ensureSyntaxTree)(state, table.end);
+      return tree2 ? highlightCellParts(state.doc, table.selectedCells, (line) => lineContext(state, line, tree2)) : [];
     }
-    const apply = this.snapshot(editor, info);
-    new ColorPicker(this.app, (color) => apply(() => this.setHighlight(editor, selection, color))).open();
+    const { main, ranges } = state.selection;
+    if (ranges.length !== 1 || main.empty) return [];
+    const tree = (0, import_language2.ensureSyntaxTree)(state, main.to);
+    return (tree && highlightParts(state.doc, main.from, main.to, (line) => lineContext(state, line, tree))) ?? [];
   }
-  setHighlight(editor, { from, to, value }, color, select = false) {
-    const prefix = color ? `~={${color}}` : "";
-    const suffix = color ? "=~" : "";
-    editor.replaceRange(prefix + value + suffix, from, to);
-    if (select) {
-      const ch = from.ch + prefix.length;
-      editor.setSelection({ ...from, ch }, { ...from, ch: ch + value.length });
+  removableHighlights(editor, parts, table) {
+    if (editor.cm?.state.readOnly) return [];
+    if (table || editor.somethingSelected()) return parts.every((part) => part.color) ? parts : [];
+    const line = selectionLine(editor);
+    const token = annotationAt(line, (token2) => token2.kind === "color");
+    return token ? [colorPart(line.from.line, line.text, token)] : [];
+  }
+  highlight(editor, info, parts, table) {
+    const apply = this.snapshot(editor, info);
+    new ColorPicker(this.app, (color) => apply(() => this.setHighlight(editor, parts, color, false, table))).open();
+  }
+  setHighlight(editor, parts, color, select, table) {
+    const transaction = highlightTransaction(parts, color, select);
+    if (table) transaction.selection = void 0;
+    if (transaction.changes.length) editor.transaction(transaction);
+  }
+  addHighlightMenuItems(menu, editor, info, table) {
+    const parts = this.highlightSelection(editor, table);
+    const removable = this.removableHighlights(editor, parts, table);
+    if (!parts.length && !removable.length) return false;
+    const apply = this.snapshot(editor, info);
+    if (removable.length) menu.addItem((item) => item.setTitle("Remove color highlight").setIcon("eraser").onClick(() => apply(() => this.setHighlight(editor, removable, null, false, table))));
+    if (parts.length) menu.addItem((item) => item.setTitle(removable.length ? "Change highlight color\u2026" : "Highlight selection\u2026").setIcon("highlighter").onClick(() => apply(() => this.highlight(editor, info, parts, table))));
+    return removable.length > 0;
+  }
+  tableHighlightMenu(view, event) {
+    const info = view.state.field(import_obsidian5.editorInfoField, false);
+    const editor = info?.editor;
+    if (editor?.cm !== view) return;
+    const cell = event.target.closest?.("td.is-selected, th.is-selected");
+    if (!cell) return;
+    const table = selectedTable(view);
+    if (table?.selectedCells.some((item) => item.el === cell)) {
+      const menu = import_obsidian5.Menu.forEvent?.(event);
+      if (menu) this.addHighlightMenuItems(menu, editor, info, table);
     }
   }
   toolbarOptions(view) {
     const info = view.state.field(import_obsidian5.editorInfoField, false);
     const editor = info?.editor;
-    if (!info?.file || !editor || editor.cm !== view) return null;
-    const line = selectionLine(editor);
-    if (!line) return null;
-    const highlight = this.highlightSelection(editor, line);
-    const selection = this.selectedText(editor, line);
-    if (!highlight && !selection?.value.trim()) return null;
+    if (!info?.file || !editor || info instanceof import_obsidian5.MarkdownView && info.getMode() !== "source") return null;
+    const table = selectedTable(editor.cm);
+    const active = editor.activeCM ?? editor.cm;
+    if (table) {
+      const { ownerDocument } = view.dom;
+      if (view !== editor.cm || !active.hasFocus && !view.hasFocus && (ownerDocument.activeElement !== ownerDocument.body || this.app.workspace.activeEditor !== info)) return null;
+    } else if (view !== active || !view.hasFocus || view.state.selection.main.empty) return null;
+    const parts = this.highlightSelection(editor, table);
+    const selection = !table && editor.cm === view ? this.selectedText(editor) : null;
+    if (!parts.length && !selection?.value.trim()) return null;
+    const firstColor = parts[0]?.color;
+    const currentColor = parts.every((part) => part.color === firstColor) ? firstColor : void 0;
     const apply = this.snapshot(editor, info);
     return {
-      color: highlight?.color,
-      applyColor: highlight && ((color) => {
-        if (color !== highlight.color) apply(() => this.setHighlight(editor, highlight, color, true));
+      color: currentColor,
+      rect: table && (() => selectedCellsRect(table, view)),
+      applyColor: parts.length > 0 && ((color) => {
+        if (color !== currentColor) apply(() => this.setHighlight(editor, parts, color, true, table));
       }),
-      removeColor: highlight?.color && (() => apply(() => this.setHighlight(editor, highlight, null, true))),
+      removeColor: parts.length > 0 && parts.every((part) => part.color) && (() => apply(() => this.setHighlight(editor, parts, null, true, table))),
       comment: selection?.value.trim() && (() => this.addComment(editor, info, selection))
     };
   }

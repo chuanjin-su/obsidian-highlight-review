@@ -1,6 +1,6 @@
 {
   "name": "obsidian-highlights-and-review",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "scripts": {
     "build": "esbuild src/main.js --bundle --format=cjs --platform=browser --target=es2020 --external:obsidian --external:@codemirror/* --outfile=main.js",

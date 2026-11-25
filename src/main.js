@@ -1,9 +1,12 @@
+import { ensureSyntaxTree } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
-import { editorInfoField, FuzzySuggestModal, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, setIcon, setTooltip } from "obsidian";
+import { editorInfoField, FuzzySuggestModal, MarkdownView, Menu, Notice, Plugin, PluginSettingTab, Setting, setIcon, setTooltip } from "obsidian";
 import { CommentPopover } from "./comments/popover.js";
 import { CommentsView, commentsViewType } from "./comments/sidebar.js";
+import { colorPart, highlightCellParts, highlightParts, highlightTransaction } from "./editor/highlights.js";
 import { editorLine, editorRect, lineContext, previewExtension } from "./editor/preview.js";
 import { selectionToolbar } from "./editor/selection-toolbar.js";
+import { selectedCellsRect, selectedTable } from "./editor/table-selection.js";
 import { trackTransaction } from "./editor/tracking.js";
 import { anchoredComments, canWrap, colors, defaultPaletteColor, isChange, overlaps, paletteProperty, reviewText, trackedInRange } from "./markup.js";
 import { renderReading } from "./reading.js";
@@ -193,8 +196,10 @@ export default class HighlightsAndReview extends Plugin {
     }});
     this.addCommand({id: "add-comment", name: "Add CriticMarkup comment", editorCallback: (editor, info) => this.addComment(editor, info)});
     this.addCommand({id: "highlight", name: "Highlight selection…", editorCheckCallback: (checking, editor, info) => {
-      if (!editor.somethingSelected()) return false;
-      if (!checking) this.highlight(editor, info);
+      const table = selectedTable(editor.cm);
+      const parts = this.highlightSelection(editor, table);
+      if (!parts.length) return false;
+      if (!checking) this.highlight(editor, info, parts, table);
       return true;
     }});
     this.reviewCommand("accept-change", "Accept tracked change", true);
@@ -203,16 +208,23 @@ export default class HighlightsAndReview extends Plugin {
       (editor, info, line, comment) => this.editComment(editor, info, line.from.line, line.text, comment));
     this.commentCommand("remove-comment", "Remove CriticMarkup comment",
       (editor, _info, line, comment) => this.removeComment(editor, line, comment));
-    this.annotationCommand("remove-highlight", "Remove color highlight", token => token.kind === "color",
-      (editor, line, token) => replaceToken(editor, line, token, line.text.slice(token.bodyFrom, token.bodyTo)));
+    this.addCommand({id: "remove-highlight", name: "Remove color highlight", editorCheckCallback: (checking, editor) => {
+      const table = selectedTable(editor.cm);
+      const parts = this.removableHighlights(editor, this.highlightSelection(editor, table), table);
+      if (!parts.length) return false;
+      if (!checking) this.setHighlight(editor, parts, null, false, table);
+      return true;
+    }});
 
     this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor, info) => {
       const add = (label, icon, callback) => menu.addItem(item => item.setTitle(label).setIcon(icon).onClick(callback));
       const line = selectionLine(editor);
       const changes = this.selectedChanges(editor);
       const comment = commentAt(line);
-      const color = annotationAt(line, token => token.kind === "color");
       const snapshot = this.snapshot(editor, info);
+      // The table cell's context menu supplies a cell-local editor.
+      const highlightEditor = info.editor ?? editor;
+      const table = selectedTable(highlightEditor.cm);
       if (changes.length) {
         const label = editor.somethingSelected() ? "tracked changes in selection" : "tracked change";
         add(`Accept ${label}`, "check", () => snapshot(() => this.applyReview(editor, changes, true)));
@@ -223,12 +235,10 @@ export default class HighlightsAndReview extends Plugin {
           this.editComment(editor, info, line.from.line, line.text, comment)));
         add("Remove CriticMarkup comment", "trash-2", () => snapshot(() => this.removeComment(editor, line, comment)));
       }
-      if (color) add("Remove color highlight", "eraser", () => snapshot(() => replaceToken(editor, line, color, line.text.slice(color.bodyFrom, color.bodyTo))));
-      if (line && !changes.length && !comment && !color) {
+      const hasHighlight = this.addHighlightMenuItems(menu, highlightEditor, info, table);
+      if (line && !changes.length && !comment && !hasHighlight) {
         add("Add CriticMarkup comment", "message-square-plus", () => this.addComment(editor, info));
       }
-      if (this.highlightSelection(editor, line)) add(color ? "Change highlight color…" : "Highlight selection…", "highlighter",
-        () => this.highlight(editor, info));
     }));
   }
 
@@ -296,16 +306,6 @@ export default class HighlightsAndReview extends Plugin {
     return Boolean(this.app.plugins?.getPlugin?.("fast-text-color"));
   }
 
-  annotationCommand(id, name, predicate, action) {
-    this.addCommand({id, name, editorCheckCallback: (checking, editor, info) => {
-      const line = selectionLine(editor);
-      const token = annotationAt(line, predicate);
-      if (!token) return false;
-      if (!checking) action(editor, line, token, info);
-      return true;
-    }});
-  }
-
   snapshot(editor, info) {
     const file = info.file;
     const read = () => editor.cm?.state.doc ?? editor.getValue();
@@ -334,52 +334,88 @@ export default class HighlightsAndReview extends Plugin {
     return null;
   }
 
-  highlightSelection(editor, line = selectionLine(editor)) {
-    if (!line || !editor.somethingSelected() || editor.listSelections().length !== 1) return null;
-    const {from, to, text, tokens} = line;
-    const token = tokens.find(token => token.kind === "color" && token.from <= from.ch && token.to >= to.ch);
-    if (token) return {from: {...from, ch: token.from}, to: {...to, ch: token.to},
-      value: text.slice(token.bodyFrom, token.bodyTo), color: token.color};
-    const selection = this.selectedText(editor, line);
-    return selection?.value.trim() ? selection : null;
-  }
-
-  highlight(editor, info) {
-    const selection = this.highlightSelection(editor);
-    if (!selection) {
-      new Notice("Select single-line prose or an existing color highlight.");
-      return;
+  highlightSelection(editor, table) {
+    const state = editor.cm?.state;
+    if (!state || state.readOnly) return [];
+    if (table) {
+      const tree = ensureSyntaxTree(state, table.end);
+      return tree ? highlightCellParts(state.doc, table.selectedCells, line => lineContext(state, line, tree)) : [];
     }
-    const apply = this.snapshot(editor, info);
-    new ColorPicker(this.app, color => apply(() => this.setHighlight(editor, selection, color))).open();
+    const {main, ranges} = state.selection;
+    if (ranges.length !== 1 || main.empty) return [];
+    const tree = ensureSyntaxTree(state, main.to);
+    return (tree && highlightParts(state.doc, main.from, main.to, line => lineContext(state, line, tree))) ?? [];
   }
 
-  setHighlight(editor, {from, to, value}, color, select = false) {
-    const prefix = color ? `~={${color}}` : "";
-    const suffix = color ? "=~" : "";
-    editor.replaceRange(prefix + value + suffix, from, to);
-    if (select) {
-      const ch = from.ch + prefix.length;
-      editor.setSelection({...from, ch}, {...from, ch: ch + value.length});
+  removableHighlights(editor, parts, table) {
+    if (editor.cm?.state.readOnly) return [];
+    if (table || editor.somethingSelected()) return parts.every(part => part.color) ? parts : [];
+    const line = selectionLine(editor);
+    const token = annotationAt(line, token => token.kind === "color");
+    return token ? [colorPart(line.from.line, line.text, token)] : [];
+  }
+
+  highlight(editor, info, parts, table) {
+    const apply = this.snapshot(editor, info);
+    new ColorPicker(this.app, color => apply(() => this.setHighlight(editor, parts, color, false, table))).open();
+  }
+
+  setHighlight(editor, parts, color, select, table) {
+    const transaction = highlightTransaction(parts, color, select);
+    if (table) transaction.selection = undefined;
+    if (transaction.changes.length) editor.transaction(transaction);
+  }
+
+  addHighlightMenuItems(menu, editor, info, table) {
+    const parts = this.highlightSelection(editor, table);
+    const removable = this.removableHighlights(editor, parts, table);
+    if (!parts.length && !removable.length) return false;
+    const apply = this.snapshot(editor, info);
+    if (removable.length) menu.addItem(item => item.setTitle("Remove color highlight").setIcon("eraser")
+      .onClick(() => apply(() => this.setHighlight(editor, removable, null, false, table))));
+    if (parts.length) menu.addItem(item => item.setTitle(removable.length ? "Change highlight color…" : "Highlight selection…")
+      .setIcon("highlighter").onClick(() => apply(() => this.highlight(editor, info, parts, table))));
+    return removable.length > 0;
+  }
+
+  tableHighlightMenu(view, event) {
+    const info = view.state.field(editorInfoField, false);
+    const editor = info?.editor;
+    if (editor?.cm !== view) return;
+    const cell = event.target.closest?.("td.is-selected, th.is-selected");
+    if (!cell) return;
+    const table = selectedTable(view);
+    if (table?.selectedCells.some(item => item.el === cell)) {
+      const menu = Menu.forEvent?.(event);
+      if (menu) this.addHighlightMenuItems(menu, editor, info, table);
     }
   }
 
   toolbarOptions(view) {
     const info = view.state.field(editorInfoField, false);
     const editor = info?.editor;
-    if (!info?.file || !editor || editor.cm !== view) return null;
-    const line = selectionLine(editor);
-    if (!line) return null;
-    const highlight = this.highlightSelection(editor, line);
-    const selection = this.selectedText(editor, line);
-    if (!highlight && !selection?.value.trim()) return null;
+    if (!info?.file || !editor || (info instanceof MarkdownView && info.getMode() !== "source")) return null;
+    const table = selectedTable(editor.cm);
+    const active = editor.activeCM ?? editor.cm;
+    if (table) {
+      const {ownerDocument} = view.dom;
+      if (view !== editor.cm || (!active.hasFocus && !view.hasFocus &&
+          (ownerDocument.activeElement !== ownerDocument.body || this.app.workspace.activeEditor !== info))) return null;
+    } else if (view !== active || !view.hasFocus || view.state.selection.main.empty) return null;
+    const parts = this.highlightSelection(editor, table);
+    const selection = !table && editor.cm === view ? this.selectedText(editor) : null;
+    if (!parts.length && !selection?.value.trim()) return null;
+    const firstColor = parts[0]?.color;
+    const currentColor = parts.every(part => part.color === firstColor) ? firstColor : undefined;
     const apply = this.snapshot(editor, info);
     return {
-      color: highlight?.color,
-      applyColor: highlight && (color => {
-        if (color !== highlight.color) apply(() => this.setHighlight(editor, highlight, color, true));
+      color: currentColor,
+      rect: table && (() => selectedCellsRect(table, view)),
+      applyColor: parts.length > 0 && (color => {
+        if (color !== currentColor) apply(() => this.setHighlight(editor, parts, color, true, table));
       }),
-      removeColor: highlight?.color && (() => apply(() => this.setHighlight(editor, highlight, null, true))),
+      removeColor: parts.length > 0 && parts.every(part => part.color) &&
+        (() => apply(() => this.setHighlight(editor, parts, null, true, table))),
       comment: selection?.value.trim() && (() => this.addComment(editor, info, selection))
     };
   }

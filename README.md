@@ -11,7 +11,7 @@ Requires Obsidian 1.7.2 or newer.
 
 ## Review a note
 
-- **Highlight text.** Select a single-line passage in Editing view and pick a color from the floating toolbar. Select text within an existing highlight to recolor it or remove it. In **Settings → Highlights & Review → Highlight colors**, change each color’s appearance in notes and the toolbar, or choose which swatches the toolbar shows. Use **Reset** for a single color or **Reset palette** for all colors. Highlight commands are also available in the command palette and editor menu.
+- **Highlight text.** Select a passage in Editing view and pick a color from the floating toolbar. Selections can span prose lines, include text within a table cell, or cover multiple cells in Live Preview. Selecting multiple cells applies the color to all their text in one action. Highlight controls are hidden when a selection crosses between prose and a table. Select highlighted text to recolor it or remove the highlight. In **Settings → Highlights & Review → Highlight colors**, change each color’s appearance in notes and the toolbar, or choose which swatches the toolbar shows. Use **Reset** for a single color or **Reset palette** for all colors. Highlight commands are also available in the command palette and editor menu.
 - **Leave comments.** Select text and click the toolbar’s comment button, or run **Add CriticMarkup comment** to comment at the cursor. Type into the inline popover and press Enter or click the checkmark. Hover over marked text or a comment icon in Live Preview and Reading view. Click the icon to pin the popover. In Live Preview, use the pencil or trash icon to edit or delete a comment. Deleting a comment keeps the marked text and can be undone.
 - **Browse comments.** Open **Show comments sidebar** from the ribbon or command palette. The sidebar lists comments in the current note. Click an entry to open its popover in the editor.
 - **Track and review changes.** Click the compare icon beside the Reading/Editing switch or run **Toggle Track changes**. Tracking applies to the current note for the session. Right-click an individual proposal or select a range and use **Accept tracked changes in selection** or **Reject tracked changes in selection**. A single Undo reverses the entire review action.
@@ -27,7 +27,7 @@ Requires Obsidian 1.7.2 or newer.
 | Deletion | `{--old text--}` |
 | Replacement | `{~~old text~>new text~~}` |
 
-Source mode shows the raw syntax. When Fast Text Color is enabled, it handles color rendering. Annotation tools work on single-line prose. Turn off tracking for structural Markdown edits. Line breaks, code, YAML, and input-method composition are outside the supported tracking scope.
+Source mode shows the raw syntax. Multiline highlights use separate color markup on each line. When Fast Text Color is enabled, it handles color rendering. Comments and tracked edits use single-line markup. Turn off tracking for structural Markdown edits. Line breaks, code, YAML, and input-method composition are outside the supported tracking scope.
 
 ## Development
 
